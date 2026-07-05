@@ -49,6 +49,7 @@
         <p id="print-created-at-title"></p>
       </div>
       <div id="status-message" class="status-message print-hidden" role="status" aria-live="polite"></div>
+      <p id="new-law-layer-status" class="layer-status print-hidden">改正法レイヤー：読み込み待ち</p>
       <div id="map"></div>
       <div class="restriction-panel print-hidden" aria-label="制限レイヤー">
         <label>
@@ -82,7 +83,10 @@
         <span class="legend-item"><span class="legend-swatch takeoff"></span>離陸地点</span>
         <span class="legend-item"><span class="legend-swatch flight-area"></span>飛行範囲</span>
       </div>
-      <p class="source-label">出典：国土地理院地図を加工して作成</p>
+      <p class="source-label">出典：国土地理院地図を加工して作成。DID、空港周辺、小型無人機等飛行禁止法対象施設周辺地域は、地理院地図配信データを参考表示。</p>
+      <p class="print-disclaimer">
+        ※この図は飛行範囲の説明用です。DID、空港周辺、緊急用務空域、150m以上、第三者上空、小型無人機等飛行禁止法の該当有無は、国土交通省、警察庁、国土地理院、SORA map、関係機関の公式情報で別途確認してください。
+      </p>
       <div class="print-info">
         <h2>申請情報</h2>
         <dl>
@@ -154,9 +158,9 @@
         DID、空港周辺、緊急用務空域、150m以上、第三者上空などの確認は、必ず国土交通省の公式情報やSORA map等で別途確認してください。
       </p>
       <p>
-        小型無人機等飛行禁止法のレイヤーは、地理院地図が配信する対象施設周辺地域データ（警察庁・関係府省庁等）をそのまま表示しています。
-        2026年7月14日施行の改正法（イエローゾーンがおおむね300mから1,000mに拡大、違反は直罰化）による区域は、地理院側のデータ更新に依存します。
-        飛行計画の最終確認は、必ず警察庁・地理院地図の公式表示で行ってください。イエローゾーン内の飛行には、原則48時間前までの都道府県公安委員会等への事前通報が必要です。
+        小型無人機等飛行禁止法のレイヤーは、地理院地図が配信する対象施設周辺地域データ（警察庁・関係府省庁等）を参考表示しています。
+        2026年7月14日施行の改正法による区域は、地理院側のデータ更新に依存します。
+        飛行計画の最終確認は、必ず警察庁・地理院地図の公式表示で行ってください。
       </p>
     </section>
   </main>
