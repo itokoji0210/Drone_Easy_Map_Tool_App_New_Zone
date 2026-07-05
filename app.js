@@ -68,12 +68,21 @@ const droneRedLayer = L.geoJSON(null, {
 // 改正法（令和8年7月14日施行）対応：地理院地図の
 // 「【令和8年7月14日以降】対象施設周辺地域（レッドゾーン＋イエローゾーン）」レイヤー。
 // 地理院地図上のレイヤーIDは drone_rz_yz_2607。
-// タイル形式（GeoJSON / PNG）は起動時に探査して自動判別する。
-const NEW_LAW_GEOJSON_TEMPLATE = "https://maps.gsi.go.jp/xyz/drone_rz_yz_2607/{z}/{x}/{y}.geojson";
-const NEW_LAW_PNG_TEMPLATE = "https://maps.gsi.go.jp/xyz/drone_rz_yz_2607/{z}/{x}/{y}.png";
-// 東京都心（皇居周辺）のズーム8タイル。対象施設が必ず存在するため探査に使う。
-const NEW_LAW_PROBE_GEOJSON = "https://maps.gsi.go.jp/xyz/drone_rz_yz_2607/8/227/100.geojson";
-const NEW_LAW_PROBE_PNG = "https://maps.gsi.go.jp/xyz/drone_rz_yz_2607/8/227/100.png";
+// 配信ホスト・形式（GeoJSON / PNG）・提供ズームが公表されていないため、
+// 起動時に候補の組み合わせを探査して自動判別する。
+const NEW_LAW_BASES = [
+  "https://maps.gsi.go.jp/xyz/drone_rz_yz_2607",
+  "https://cyberjapandata.gsi.go.jp/xyz/drone_rz_yz_2607"
+];
+const NEW_LAW_EXTS = ["geojson", "png"];
+// 皇居周辺（対象施設が必ず存在する地点）のズーム別タイル座標
+const NEW_LAW_PROBE_TILES = {
+  8: [227, 100],
+  9: [454, 201],
+  10: [909, 403]
+};
+// GeoJSONタイル取得の上限（広域表示で高ズームタイルを大量取得しないための保険）
+const NEW_LAW_MAX_TILES = 64;
 
 // GeoJSON配信だった場合に使う分類済みレイヤー（凡例・重ね順は既存の黄・赤と揃える）
 const newLawYellowLayer = L.geoJSON(null, {
@@ -100,14 +109,8 @@ const newLawRedLayer = L.geoJSON(null, {
   }
 });
 
-// PNG配信だった場合に使うラスタオーバーレイ
-const newLawPngLayer = L.tileLayer(NEW_LAW_PNG_TEMPLATE, {
-  maxZoom: 18,
-  minZoom: 8,
-  maxNativeZoom: 16,
-  crossOrigin: "anonymous",
-  opacity: 0.6
-});
+// PNG配信だった場合に、探査で判明したURLから動的に生成する
+let newLawPngLayer = null;
 
 const newLawLayer = L.layerGroup([newLawYellowLayer, newLawRedLayer]).addTo(map);
 
@@ -436,25 +439,38 @@ async function loadAirportRestrictions() {
 }
 
 /*
- * 改正法レイヤー（drone_rz_yz_2607）の配信形式を起動時に1回だけ探査する。
- * 皇居周辺のタイルは対象施設を必ず含むため、両形式とも404なら未配信と判断する。
+ * 改正法レイヤー（drone_rz_yz_2607）の配信構成を起動時に1回だけ探査する。
+ * ホスト×形式×ズームの候補を順に試し、最初に成功した組み合わせを採用する。
+ * 戻り値: { mode: "geojson", base, zoom } | { mode: "png", base, zoom } | { mode: "none" }
  */
+async function probeNewLawCandidate(base, ext, zoom) {
+  const [x, y] = NEW_LAW_PROBE_TILES[zoom];
+  const url = `${base}/${zoom}/${x}/${y}.${ext}`;
+  try {
+    const response = await fetch(url, ext === "png" ? { method: "HEAD" } : undefined);
+    return response.ok;
+  } catch (error) {
+    return false;
+  }
+}
+
 function detectNewLawSource() {
   if (!newLawSourceModePromise) {
-    newLawSourceModePromise = fetch(NEW_LAW_PROBE_GEOJSON)
-      .then((response) => {
-        if (response.ok) return "geojson";
-        return fetch(NEW_LAW_PROBE_PNG, { method: "HEAD" })
-          .then((pngResponse) => (pngResponse.ok ? "png" : "none"))
-          .catch(() => "none");
-      })
-      .catch(() => "none")
-      .then((mode) => {
-        if (mode === "none") {
-          showStatus("改正法レイヤー（drone_rz_yz_2607）を取得できませんでした。配信状況を地理院地図で確認してください。");
+    newLawSourceModePromise = (async () => {
+      for (const ext of NEW_LAW_EXTS) {
+        for (const base of NEW_LAW_BASES) {
+          for (const zoom of Object.keys(NEW_LAW_PROBE_TILES).map(Number)) {
+            // eslint-disable-next-line no-await-in-loop
+            if (await probeNewLawCandidate(base, ext, zoom)) {
+              console.info(`改正法レイヤー: ${base}/{z}/{x}/{y}.${ext}（探査成功ズーム: ${zoom}）を使用します。`);
+              return { mode: ext, base, zoom };
+            }
+          }
         }
-        return mode;
-      });
+      }
+      showStatus("改正法レイヤー（drone_rz_yz_2607）のタイルを取得できませんでした。開発者ツールのConsoleとNetworkの内容を確認してください。");
+      return { mode: "none" };
+    })();
   }
   return newLawSourceModePromise;
 }
@@ -568,24 +584,33 @@ async function loadNewLawRestrictions() {
     return;
   }
 
-  const mode = await detectNewLawSource();
+  const source = await detectNewLawSource();
   if (requestId !== newLawRequestId || !map.hasLayer(newLawLayer)) {
     return;
   }
 
-  if (mode === "png") {
-    // ラスタ配信：タイルレイヤーを一度だけグループに加えれば以後はLeafletが管理する
+  if (source.mode === "png") {
+    // ラスタ配信：探査で判明したURLからタイルレイヤーを生成し、一度だけグループに加える
+    if (!newLawPngLayer) {
+      newLawPngLayer = L.tileLayer(`${source.base}/{z}/{x}/{y}.png`, {
+        maxZoom: 18,
+        minZoom: source.zoom,
+        maxNativeZoom: 16,
+        crossOrigin: "anonymous",
+        opacity: 0.6
+      });
+    }
     if (!newLawLayer.hasLayer(newLawPngLayer)) {
       newLawLayer.addLayer(newLawPngLayer);
     }
     return;
   }
 
-  if (mode !== "geojson") {
+  if (source.mode !== "geojson") {
     return;
   }
 
-  const zoom = 8;
+  const zoom = source.zoom;
   const bounds = map.getBounds();
   const northWest = bounds.getNorthWest();
   const southEast = bounds.getSouthEast();
@@ -593,6 +618,16 @@ async function loadNewLawRestrictions() {
   const maxX = lngToTileX(southEast.lng, zoom);
   const minY = latToTileY(northWest.lat, zoom);
   const maxY = latToTileY(southEast.lat, zoom);
+
+  // 高ズーム配信の場合、広域表示だとタイル数が膨大になるため上限を設ける
+  const tileCount = (maxX - minX + 1) * (maxY - minY + 1);
+  if (tileCount > NEW_LAW_MAX_TILES) {
+    newLawYellowLayer.clearLayers();
+    newLawRedLayer.clearLayers();
+    showStatus("表示範囲が広すぎるため改正法レイヤーを省略しました。地図を拡大すると表示されます。");
+    return;
+  }
+
   const requests = [];
 
   newLawYellowLayer.clearLayers();
@@ -602,10 +637,7 @@ async function loadNewLawRestrictions() {
     for (let y = minY; y <= maxY; y += 1) {
       const key = `${zoom}/${x}/${y}`;
       if (!newLawTileCache.has(key)) {
-        const url = NEW_LAW_GEOJSON_TEMPLATE
-          .replace("{z}", zoom)
-          .replace("{x}", x)
-          .replace("{y}", y);
+        const url = `${source.base}/${zoom}/${x}/${y}.geojson`;
         newLawTileCache.set(
           key,
           fetch(url)
