@@ -73,27 +73,44 @@ const droneRedLayer = L.geoJSON(null, {
   }
 });
 
-// 改正法（令和8年7月14日施行）対応：地理院地図の
-// 「【令和8年7月14日以降】対象施設周辺地域（レッドゾーン＋イエローゾーン）」
-// を地理院地図と同じPNGタイルで参考表示する。
-// レイヤーID: drone_rz_yz_2607
-const newLawLayer = L.tileLayer("https://maps.gsi.go.jp/xyz/drone_rz_yz_2607/{z}/{x}/{y}.png", {
-  pane: "restrictionTilePane",
-  maxZoom: 18,
-  minZoom: 5,
-  maxNativeZoom: 18,
-  crossOrigin: "anonymous",
-  opacity: 0.82,
-  zIndex: 530,
-  attribution: NEW_LAW_SOURCE_TEXT
-}).addTo(map);
+// 改正法（令和8年7月14日施行）対応。
+// 地理院地図URLの `drone_rz_yz_2607` はグループIDで、実データは下記2レイヤー。
+// - drone_yz_2607: イエローゾーン GeoJSON
+// - drone_rz_2607: レッドゾーン GeoJSON
+// そのため、PNGタイルではなくGeoJSONを現在の表示範囲だけ読み込む。
+const newLawYellowLayer = L.geoJSON(null, {
+  pane: "restrictionVectorPane",
+  style: {
+    color: "#a66b00",
+    weight: 3,
+    opacity: 0.98,
+    dashArray: "7 4",
+    fillColor: "#ffcc00",
+    fillOpacity: 0.34
+  }
+});
+
+const newLawRedLayer = L.geoJSON(null, {
+  pane: "restrictionVectorPane",
+  style: {
+    color: "#b42318",
+    weight: 3,
+    opacity: 0.98,
+    dashArray: "7 4",
+    fillColor: "#da2d2d",
+    fillOpacity: 0.44
+  }
+});
 
 const droneLawLayer = L.layerGroup([droneYellowLayer, droneRedLayer]).addTo(map);
+const newLawLayer = L.layerGroup([newLawYellowLayer, newLawRedLayer]).addTo(map);
 
 const airportTileCache = new Map();
 const droneLawTileCache = new Map();
+const newLawTileCache = new Map();
 let airportRequestId = 0;
 let droneLawRequestId = 0;
+let newLawRequestId = 0;
 
 const drawnItems = new L.FeatureGroup();
 map.addLayer(drawnItems);
@@ -480,7 +497,7 @@ async function loadDroneLawRestrictions() {
   droneRedLayer.bringToFront();
 }
 
-/* ---------- 改正法レイヤー（PNGタイル） ---------- */
+/* ---------- 改正法レイヤー（GeoJSON） ---------- */
 
 function setNewLawLayerStatus(message, warning = false) {
   const status = document.getElementById("new-law-layer-status");
@@ -489,19 +506,87 @@ function setNewLawLayerStatus(message, warning = false) {
   status.classList.toggle("warning", warning);
 }
 
-newLawLayer.on("loading", () => {
-  setNewLawLayerStatus("改正法レイヤー：読み込み中");
-});
+async function loadNewLawRestrictions() {
+  newLawRequestId += 1;
+  const requestId = newLawRequestId;
 
-newLawLayer.on("load", () => {
-  if (map.hasLayer(newLawLayer)) {
-    setNewLawLayerStatus("改正法レイヤー：表示中（参考表示）");
+  if (!map.hasLayer(newLawLayer) || map.getZoom() < 8) {
+    newLawYellowLayer.clearLayers();
+    newLawRedLayer.clearLayers();
+    setNewLawLayerStatus(map.hasLayer(newLawLayer) ? "改正法レイヤー：ズーム8以上で表示" : "改正法レイヤー：非表示");
+    return;
   }
-});
 
-newLawLayer.on("tileerror", () => {
-  setNewLawLayerStatus("改正法レイヤー：一部読み込み失敗。公式地図で再確認", true);
-});
+  setNewLawLayerStatus("改正法レイヤー：読み込み中");
+
+  const zoom = 8;
+  const bounds = map.getBounds();
+  const northWest = bounds.getNorthWest();
+  const southEast = bounds.getSouthEast();
+  const minX = lngToTileX(northWest.lng, zoom);
+  const maxX = lngToTileX(southEast.lng, zoom);
+  const minY = latToTileY(northWest.lat, zoom);
+  const maxY = latToTileY(southEast.lat, zoom);
+  const requests = [];
+
+  newLawYellowLayer.clearLayers();
+  newLawRedLayer.clearLayers();
+
+  for (let x = minX; x <= maxX; x += 1) {
+    for (let y = minY; y <= maxY; y += 1) {
+      [
+        ["yellow", "https://maps.gsi.go.jp/xyz/drone_yz_2607/{z}/{x}/{y}.geojson"],
+        ["red", "https://maps.gsi.go.jp/xyz/drone_rz_2607/{z}/{x}/{y}.geojson"]
+      ].forEach(([type, template]) => {
+        const key = `${type}/${zoom}/${x}/${y}`;
+        if (!newLawTileCache.has(key)) {
+          const url = template
+            .replace("{z}", zoom)
+            .replace("{x}", x)
+            .replace("{y}", y);
+          newLawTileCache.set(
+            key,
+            fetch(url)
+              .then((response) => (response.ok ? response.json() : null))
+              .catch(() => null)
+          );
+        }
+
+        requests.push(
+          newLawTileCache.get(key).then((geojson) => ({ type, geojson }))
+        );
+      });
+    }
+  }
+
+  const features = await Promise.all(requests);
+  if (requestId !== newLawRequestId || !map.hasLayer(newLawLayer)) {
+    return;
+  }
+
+  newLawYellowLayer.clearLayers();
+  newLawRedLayer.clearLayers();
+
+  let added = 0;
+  features.forEach(({ type, geojson }) => {
+    if (!geojson) return;
+    if (type === "red") {
+      newLawRedLayer.addData(geojson);
+    } else {
+      newLawYellowLayer.addData(geojson);
+    }
+    added += 1;
+  });
+
+  newLawYellowLayer.bringToFront();
+  newLawRedLayer.bringToFront();
+
+  if (added > 0) {
+    setNewLawLayerStatus("改正法レイヤー：表示中（参考表示）");
+  } else {
+    setNewLawLayerStatus("改正法レイヤー：この範囲にデータなし、または取得失敗", true);
+  }
+}
 
 /* ---------- 住所検索（国土地理院 住所検索API） ---------- */
 
@@ -674,6 +759,7 @@ async function preparePrintLayout() {
   }
   await loadAirportRestrictions();
   await loadDroneLawRestrictions();
+  await loadNewLawRestrictions();
   await waitForVisibleTiles();
   await redrawMapForCurrentLayout();
   await waitForVisibleTiles();
@@ -690,6 +776,7 @@ async function restoreScreenLayout() {
   await redrawMapForCurrentLayout();
   await loadAirportRestrictions();
   await loadDroneLawRestrictions();
+  await loadNewLawRestrictions();
 }
 
 function saveBlob(blob, filename) {
@@ -1171,12 +1258,7 @@ elements.droneLawLayer.addEventListener("change", () => {
 
 elements.newLawLayer.addEventListener("change", () => {
   setTileOverlay(newLawLayer, elements.newLawLayer.checked);
-  if (elements.newLawLayer.checked) {
-    newLawLayer.bringToFront();
-    setNewLawLayerStatus("改正法レイヤー：表示中（参考表示）");
-  } else {
-    setNewLawLayerStatus("改正法レイヤー：非表示");
-  }
+  loadNewLawRestrictions();
 });
 
 elements.labels.addEventListener("change", () => {
@@ -1190,6 +1272,7 @@ elements.inputs.forEach((input) => {
 map.on("moveend zoomend", () => {
   loadAirportRestrictions();
   loadDroneLawRestrictions();
+  loadNewLawRestrictions();
 });
 
 let lastHandledTouchAt = 0;
@@ -1259,4 +1342,5 @@ restoreFormFromStorage();
 setLabelsVisible(labelsVisible);
 loadAirportRestrictions();
 loadDroneLawRestrictions();
+loadNewLawRestrictions();
 setNewLawLayerStatus("改正法レイヤー：表示中（参考表示）");
