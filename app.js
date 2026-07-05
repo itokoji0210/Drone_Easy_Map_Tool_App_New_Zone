@@ -13,8 +13,14 @@ const map = L.map("map", {
   preferCanvas: true
 }).setView(TOKYO_STATION, 16);
 
-map.createPane("restrictionPane");
-map.getPane("restrictionPane").style.zIndex = 350;
+map.createPane("didPane");
+map.getPane("didPane").style.zIndex = 300;
+
+map.createPane("restrictionTilePane");
+map.getPane("restrictionTilePane").style.zIndex = 520;
+
+map.createPane("restrictionVectorPane");
+map.getPane("restrictionVectorPane").style.zIndex = 620;
 
 L.control.scale({ imperial: false, position: "bottomright" }).addTo(map);
 
@@ -26,43 +32,44 @@ const tileLayer = L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/
 }).addTo(map);
 
 const didLayer = L.tileLayer("https://maps.gsi.go.jp/xyz/did2020/{z}/{x}/{y}.png", {
+  pane: "didPane",
   maxZoom: 18,
   minZoom: 8,
   crossOrigin: "anonymous",
-  opacity: 0.58,
+  opacity: 0.42,
   attribution: DID_SOURCE_TEXT
 }).addTo(map);
 
 const airportLayer = L.geoJSON(null, {
-  pane: "restrictionPane",
+  pane: "restrictionVectorPane",
   style: {
     color: "#16803a",
     weight: 2,
     opacity: 0.9,
     fillColor: "#5ec269",
-    fillOpacity: 0.28
+    fillOpacity: 0.45
   }
 }).addTo(map);
 
 const droneYellowLayer = L.geoJSON(null, {
-  pane: "restrictionPane",
+  pane: "restrictionVectorPane",
   style: {
     color: "#a66b00",
     weight: 2,
     opacity: 0.92,
     fillColor: "#ffcc00",
-    fillOpacity: 0.24
+    fillOpacity: 0.42
   }
 });
 
 const droneRedLayer = L.geoJSON(null, {
-  pane: "restrictionPane",
+  pane: "restrictionVectorPane",
   style: {
     color: "#b42318",
     weight: 2,
     opacity: 0.95,
     fillColor: "#da2d2d",
-    fillOpacity: 0.34
+    fillOpacity: 0.48
   }
 });
 
@@ -71,11 +78,13 @@ const droneRedLayer = L.geoJSON(null, {
 // を地理院地図と同じPNGタイルで参考表示する。
 // レイヤーID: drone_rz_yz_2607
 const newLawLayer = L.tileLayer("https://maps.gsi.go.jp/xyz/drone_rz_yz_2607/{z}/{x}/{y}.png", {
+  pane: "restrictionTilePane",
   maxZoom: 18,
   minZoom: 5,
   maxNativeZoom: 18,
   crossOrigin: "anonymous",
-  opacity: 0.68,
+  opacity: 0.82,
+  zIndex: 530,
   attribution: NEW_LAW_SOURCE_TEXT
 }).addTo(map);
 
@@ -160,7 +169,7 @@ const polygonOptions = {
     weight: 5,
     opacity: 0.95,
     fillColor: "#2f80d0",
-    fillOpacity: 0.28
+    fillOpacity: 0.45
   }
 };
 
@@ -397,6 +406,78 @@ async function loadAirportRestrictions() {
 
   airportLayer.clearLayers();
   features.filter(Boolean).forEach((geojson) => airportLayer.addData(geojson));
+  airportLayer.bringToFront();
+}
+
+async function loadDroneLawRestrictions() {
+  droneLawRequestId += 1;
+  const requestId = droneLawRequestId;
+
+  if (!map.hasLayer(droneLawLayer) || map.getZoom() < 8) {
+    droneYellowLayer.clearLayers();
+    droneRedLayer.clearLayers();
+    return;
+  }
+
+  const zoom = 8;
+  const bounds = map.getBounds();
+  const northWest = bounds.getNorthWest();
+  const southEast = bounds.getSouthEast();
+  const minX = lngToTileX(northWest.lng, zoom);
+  const maxX = lngToTileX(southEast.lng, zoom);
+  const minY = latToTileY(northWest.lat, zoom);
+  const maxY = latToTileY(southEast.lat, zoom);
+  const requests = [];
+
+  droneYellowLayer.clearLayers();
+  droneRedLayer.clearLayers();
+
+  for (let x = minX; x <= maxX; x += 1) {
+    for (let y = minY; y <= maxY; y += 1) {
+      [
+        ["yellow", "https://maps.gsi.go.jp/xyz/drone_yz/{z}/{x}/{y}.geojson"],
+        ["red", "https://maps.gsi.go.jp/xyz/drone_rz/{z}/{x}/{y}.geojson"]
+      ].forEach(([type, template]) => {
+        const key = `${type}/${zoom}/${x}/${y}`;
+        if (!droneLawTileCache.has(key)) {
+          const url = template
+            .replace("{z}", zoom)
+            .replace("{x}", x)
+            .replace("{y}", y);
+          droneLawTileCache.set(
+            key,
+            fetch(url)
+              .then((response) => (response.ok ? response.json() : null))
+              .catch(() => null)
+          );
+        }
+
+        requests.push(
+          droneLawTileCache.get(key).then((geojson) => ({ type, geojson }))
+        );
+      });
+    }
+  }
+
+  const features = await Promise.all(requests);
+  if (requestId !== droneLawRequestId || !map.hasLayer(droneLawLayer)) {
+    return;
+  }
+
+  droneYellowLayer.clearLayers();
+  droneRedLayer.clearLayers();
+
+  features.forEach(({ type, geojson }) => {
+    if (!geojson) return;
+    if (type === "red") {
+      droneRedLayer.addData(geojson);
+    } else {
+      droneYellowLayer.addData(geojson);
+    }
+  });
+
+  droneYellowLayer.bringToFront();
+  droneRedLayer.bringToFront();
 }
 
 /* ---------- 改正法レイヤー（PNGタイル） ---------- */
@@ -1091,6 +1172,7 @@ elements.droneLawLayer.addEventListener("change", () => {
 elements.newLawLayer.addEventListener("change", () => {
   setTileOverlay(newLawLayer, elements.newLawLayer.checked);
   if (elements.newLawLayer.checked) {
+    newLawLayer.bringToFront();
     setNewLawLayerStatus("改正法レイヤー：表示中（参考表示）");
   } else {
     setNewLawLayerStatus("改正法レイヤー：非表示");
